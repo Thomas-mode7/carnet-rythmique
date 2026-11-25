@@ -61,6 +61,8 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
 .tool{height:34px;padding-inline:12px;border-radius:6px;background:var(--panel);border:1px solid var(--line);font-size:13px;font-weight:600;letter-spacing:.03em}
 .tool.on{background:var(--hat);border-color:var(--hat);color:#062420}
 .tool:disabled{opacity:.4}
+.midimenu{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:8px;border:1px solid var(--line);border-radius:var(--r);background:var(--panel)}
+.midimenu .lbl{width:100%}
 .chainbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px;color:var(--dim);min-height:22px}
 .chainbar .num{color:var(--ink)}
 
@@ -206,6 +208,12 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
       <button class="tool" id="clearP">Effacer</button>
       <button class="tool" id="chainEdit">Chaîne</button>
       <button class="tool" id="midi">Export MIDI</button>
+    </div>
+    <div class="midimenu" id="midiMenu" hidden>
+      <span class="lbl">Format MIDI</span>
+      <button class="tool" data-map="chroma">Chromatique (C1…)</button>
+      <button class="tool" data-map="jackbox">Jackbox 7R-909</button>
+      <button class="tool" data-map="gm">General MIDI</button>
     </div>
     <div class="chainbar" id="chainbar"></div>
   </section>
@@ -644,7 +652,8 @@ function wire(){
   $("clearP").onclick=()=>{const slot=state.cur,old=clone(state.bank[slot]);state.bank[slot]=blankPattern();saveSlot(slot);renderAll();
     toast(slotName(slot)+" effacé",()=>{state.bank[slot]=old;saveSlot(slot);renderAll()})};
   $("chainEdit").onclick=()=>{state.chainEdit=!state.chainEdit;if(state.chainEdit&&state.settings.chain.length>=4){state.settings.chain=[];saveSettings()}renderChain();renderBank()};
-  $("midi").onclick=exportMidi;
+  $("midi").onclick=()=>{const m=$("midiMenu");m.hidden=!m.hidden;$("midi").classList.toggle("on",!m.hidden)};
+  $("midiMenu").addEventListener("click",e=>{const b=e.target.closest("button[data-map]");if(!b)return;$("midiMenu").hidden=true;$("midi").classList.remove("on");exportMidi(b.dataset.map)});
   $("backup").onclick=exportBackup;
   $("restore").onclick=()=>$("restoreFile").click();
   $("restoreFile").onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{const d=JSON.parse(r.result);if(!Array.isArray(d.bank))throw 0;
@@ -658,16 +667,26 @@ function wire(){
 // with bar conditions, write enough bars for every condition to come round (4 bars, or 4 x the chain when needed)
 function midiBars(slots){const has=slots.some(i=>{const c=state.bank[i].cond;return c&&Object.keys(c).length});if(!has)return slots.length;const g=(a,b)=>b?g(b,a%b):a;return slots.length*4/g(slots.length,4)}
 function vlq(n){const b=[n&127];while(n>>=7)b.unshift((n&127)|128);return b}
-function buildMidi(slots){
+/* MIDI note maps. "chroma": one note per track from C1 (= note 36, the convention where middle C is C3), channel 1.
+   "jackbox": Quadelectra Jackbox 7R-909 (manual, appendix I): no 2nd kick so BD2 also plays BD; accent = velocity >= 100;
+   flam = key switch C0 (note 24) held over the step. "gm": General MIDI drums, channel 10. */
+const MIDIMAPS={
+  chroma:{label:"Chromatique (C1…)",suffix:"chromatique",ch:0,note:t=>36+TRACKS.indexOf(t),vel:[0,50,80,100],acc:v=>Math.min(127,v+Math.round(27*state.settings.accent/60)),flamSwitch:false},
+  jackbox:{label:"Jackbox 7R-909",suffix:"jackbox",ch:0,note:t=>({BD:36,B8:36,RS:37,SD:38,CP:39,CH:42,OH:46,LT:41,MT:45,HT:48,CR:49,RD:51})[t.id],vel:[0,62,82,96],acc:()=>127,flamSwitch:true},
+  gm:{label:"General MIDI",suffix:"gm",ch:9,note:t=>t.note,vel:[0,50,80,100],acc:v=>Math.min(127,v+Math.round(27*state.settings.accent/60)),flamSwitch:false},
+};
+function buildMidi(slots,mapId){
+  const M=MIDIMAPS[mapId||"gm"],ON=0x90|M.ch,OFF=0x80|M.ch,flamAt=new Set();
   const PPQ=96,S=24,s=state.settings,ev=[];
   const flTicks=Math.max(1,Math.round(s.flam/1000*s.bpm/60*PPQ));
   const bars=midiBars(slots);
   for(let pi=0;pi<bars;pi++){const p=state.bank[slots[pi%slots.length]];
     for(let i=0;i<16;i++){const base=pi*16*S+i*S+(i%2?Math.round(SWING[s.swing]*S):0);
       TRACKS.forEach(t=>{if(s.kit[t.id].mute)return;const c=cellOf(p,t.id,i);if(!c.v||!condOk(c.c,pi))return;
-        let v=[0,50,80,100][c.v];if(c.a)v=Math.min(127,v+Math.round(27*s.accent/60));
-        const add=(tk,vel,len)=>{ev.push({t:tk,o:1,b:[0x99,t.note,Math.max(1,Math.min(127,vel))]});ev.push({t:tk+len,o:0,b:[0x89,t.note,0]})};
-        if(c.f){add(base,Math.round(v*.6),Math.min(6,flTicks));add(base+flTicks,v,12)}else add(base,v,12);});}}
+        let v=M.vel[c.v];if(c.a)v=M.acc(v);const n=M.note(t);
+        const add=(tk,vel,len)=>{ev.push({t:tk,o:1,b:[ON,n,Math.max(1,Math.min(127,vel))]});ev.push({t:tk+len,o:0,b:[OFF,n,0]})};
+        if(c.f&&M.flamSwitch){if(!flamAt.has(base)){flamAt.add(base);ev.push({t:Math.max(0,base-2),o:1,b:[ON,24,100]});ev.push({t:base+12,o:0,b:[OFF,24,0]})}add(base,v,12)}
+        else if(c.f){add(base,Math.round(v*.6),Math.min(6,flTicks));add(base+flTicks,v,12)}else add(base,v,12);});}}
   ev.sort((a,b)=>a.t-b.t||a.o-b.o);
   const tempo=Math.round(60000000/s.bpm),end=bars*16*S;
   let trk=[0,0xFF,0x03,...vlq(16),...[..."Carnet Rythmique"].map(c=>c.charCodeAt(0)),
@@ -702,10 +721,10 @@ async function offerFile(filename,data,fallbackName,fallbackData,mime){
   const url=URL.createObjectURL(new Blob([fallbackData||data],{type:mime||"application/octet-stream"}));
   const a=document.createElement("a");a.href=url;a.download=fallbackName||filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),4000);
 }
-function exportMidi(){
+function exportMidi(mapId){
   const ch=state.settings.chain,useChain=state.chainOn&&ch.length>1,slots=useChain?ch:[state.cur];
-  const base="carnet-"+slots.map(slotName).join("-")+"-"+state.settings.bpm+"bpm";
-  const mid=buildMidi(slots);
+  const base="carnet-"+slots.map(slotName).join("-")+"-"+state.settings.bpm+"bpm-"+MIDIMAPS[mapId].suffix;
+  const mid=buildMidi(slots,mapId);
   offerFile(base+".zip",zipOne(base+".mid",mid),base+".mid",mid,"audio/midi");
 }
 function exportBackup(){

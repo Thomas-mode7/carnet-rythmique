@@ -9,11 +9,11 @@ async function offerFile(name,data,mime){
   }
   localDownload(name,data,mime);
 }
-function exportMidi(){
+function exportMidi(mapId){
   const ch=state.settings.chain,useChain=state.chainOn&&ch.length>1,slots=useChain?ch:[state.cur];
   const stamp=new Date().toISOString().slice(0,16).replace("T"," ").replace(":","h");
-  const name="carnet "+slots.map(slotName).join("-")+" "+state.settings.bpm+"bpm "+stamp+".mid";
-  offerFile(name,buildMidi(slots),"audio/midi");
+  const name="carnet "+slots.map(slotName).join("-")+" "+state.settings.bpm+"bpm "+MIDIMAPS[mapId].suffix+" "+stamp+".mid";
+  offerFile(name,buildMidi(slots,mapId),"audio/midi");
 }
 function exportBackup(){
   const n="carnet-rythmique-banque-"+new Date().toISOString().slice(0,10)+".json";
